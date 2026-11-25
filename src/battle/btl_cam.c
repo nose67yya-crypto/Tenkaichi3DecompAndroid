@@ -9,6 +9,8 @@
 #include "battle/tag_options.h"
 #include "battle/tag_clash.h"
 #ifdef PORT
+extern int Port_Setting(const char *name, int def);
+extern s32 CamShake_TiltInDemo(void);
 #include "../../port/src/gs/tag_net.h"
 #include "battle/tag_fusion.h"
 #include "battle/btl_scene.h"
@@ -784,6 +786,41 @@ void CamShake_Calc(CamShake *shake, Vec4 *posOfs, Vec4 *rotOfs) {
     }
     Vec4_SetZeroW1(posOfs);
     Vec4_SetZero(rotOfs);
+#ifdef PORT
+    /* Tilt (roll) on every hit, Port_Setting("cam_tilt", 0): 0 off, 1..6 how far. It uses no rand(), so the game's random numbers are untouched. */
+    {
+        static int sTiltRead = 0;
+        static int sTilt = 0;
+        static f32 sLastTime = 0.0f;
+        static f32 sSign = 1.0f;
+
+        if (!sTiltRead) {
+            sTilt = Port_Setting("cam_tilt", 0);
+            if (sTilt < 0) {
+                sTilt = 0;
+            }
+            if (sTilt > 6) {
+                sTilt = 6;
+            }
+            sTiltRead = 1;
+        }
+        if (strength <= 0.0f) {
+            sLastTime = 0.0f;
+        } else if (time > sLastTime) {
+            sSign = -sSign; /* a new hit: the other side */
+            sLastTime = time;
+        } else {
+            sLastTime = time;
+        }
+        if (strength > 0.0f && sTilt > 0) {
+            f32 a = time * 0.05f * strength;
+            if (a > 0.1f) {
+                a = 0.1f;
+            }
+            rotOfs->z = sSign * a * 0.5f * (f32)sTilt; /* 0.05 rad (about 3 degrees) per step at most */
+        }
+    }
+#endif
     if (strength > 0.0f) {
         amp = time * 0.05f * strength;
         if (amp > 0.1f) {
@@ -796,6 +833,20 @@ void CamShake_Calc(CamShake *shake, Vec4 *posOfs, Vec4 *rotOfs) {
         posOfs->z = ((rand() & 0xFF) - 0x7F) * 0.5f * amp;
     }
 }
+
+#ifdef PORT
+/* Port_Setting("cam_tilt_demo", 1): whether the tilt also applies in the scripted (demo) cameras. */
+s32 CamShake_TiltInDemo(void) {
+    static int sRead = 0;
+    static int sOn = 1;
+
+    if (!sRead) {
+        sOn = Port_Setting("cam_tilt_demo", 1) != 0;
+        sRead = 1;
+    }
+    return sOn;
+}
+#endif
 
 /* Time left of the strongest shake slot (0 when none is active). */
 f32 CamShake_GetTime(CamShake *shake) {

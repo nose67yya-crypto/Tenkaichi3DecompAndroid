@@ -173,6 +173,9 @@ s32 DemoCam_Update(void) {
         Vec4_Copy(&pos, &gDemoCam->fixedPos);
         Vec4_Copy(&rot, &gDemoCam->fixedRot);
         CamShake_Calc(&gDemoCam->shake, &posOfs, &rotOfs);
+#ifdef PORT
+        { extern s32 CamShake_TiltInDemo(void); if (!CamShake_TiltInDemo()) { rotOfs.z = 0.0f; } }
+#endif
         pos.x += posOfs.x;
         pos.y += posOfs.y;
         pos.z += posOfs.z;
@@ -226,6 +229,9 @@ s32 DemoCam_Update(void) {
         shakePos.w = 1.0f;
         Vec4_Set(&rot, pose->f.rot[0], pose->f.rot[1], pose->f.rot[2], 0.0f);
         CamShake_Calc(&gDemoCam->shake, &shakePos, &shakeRot);
+#ifdef PORT
+        { extern s32 CamShake_TiltInDemo(void); if (!CamShake_TiltInDemo()) { shakeRot.z = 0.0f; } }
+#endif
         rot.x += shakeRot.x;
         rot.y += shakeRot.y;
         rot.z += shakeRot.z;
