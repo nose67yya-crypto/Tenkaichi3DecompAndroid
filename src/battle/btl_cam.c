@@ -9,6 +9,8 @@
 #include "battle/tag_options.h"
 #include "battle/tag_clash.h"
 #ifdef PORT
+extern f32 powf(f32 x, f32 y); /* the game's own (software float) maths, declared by hand like the other files */
+extern f32 sqrtf(f32 x);
 extern int Port_Setting(const char *name, int def);
 extern s32 CamShake_TiltInDemo(void);
 #include "../../port/src/gs/tag_net.h"
@@ -742,9 +744,126 @@ void DbgCam_SetLocked(s32 locked) {
     gDbgCamLocked = locked;
 }
 
+#ifdef PORT
+/* ---- Hit tilt: the camera rolls to one side on every hit, holds, and eases back (like Sparking! ZERO) ----
+ * Port_Setting("cam_tilt", 0)      0 off, 1..6 how far (the peak is about 3 degrees per step on the hardest hits)
+ * Port_Setting("cam_tilt_len", 4)  how long it takes to settle, in tenths of a second (1..20)
+ * Kept per CamShake. It uses no rand(), so the game's random numbers and its logic are untouched. */
+#define TILT_SLOTS 8
+typedef struct TiltSlot {
+    const CamShake *key;
+    f32 target; /* where the roll is heading (radians); a new hit sets it, then it fades */
+    f32 roll;   /* what is applied this frame: it chases target, so the tilt comes in smoothly */
+    f32 sign;
+} TiltSlot;
+
+static TiltSlot sTiltSlots[TILT_SLOTS];
+static int sTiltRead = 0;
+static int sTiltLevel = 0;
+static f32 sTiltDecay = 0.78f;
+
+static void Tilt_ReadSettings(void) {
+    int len;
+
+    if (sTiltRead) {
+        return;
+    }
+    sTiltRead = 1;
+    sTiltLevel = Port_Setting("cam_tilt", 0);
+    if (sTiltLevel < 0) {
+        sTiltLevel = 0;
+    }
+    if (sTiltLevel > 6) {
+        sTiltLevel = 6;
+    }
+    len = Port_Setting("cam_tilt_len", 4);
+    if (len < 1) {
+        len = 1;
+    }
+    if (len > 20) {
+        len = 20;
+    }
+    /* the target falls to 5% after len/10 seconds (30 frames a second) */
+    sTiltDecay = powf(0.05f, 1.0f / ((f32)len * 3.0f));
+}
+
+static TiltSlot *Tilt_Find(const CamShake *key, int create) {
+    int i;
+
+    for (i = 0; i < TILT_SLOTS; i++) {
+        if (sTiltSlots[i].key == key) {
+            return &sTiltSlots[i];
+        }
+    }
+    if (!create) {
+        return NULL;
+    }
+    for (i = 0; i < TILT_SLOTS; i++) {
+        if (sTiltSlots[i].key == NULL) {
+            sTiltSlots[i].key = key;
+            sTiltSlots[i].sign = 1.0f;
+            return &sTiltSlots[i];
+        }
+    }
+    return NULL;
+}
+
+/* A hit asked for a shake: start a roll, on the other side from the last one. The harder the hit, the bigger. */
+static void Tilt_Hit(const CamShake *key, f32 strength, f32 time) {
+    TiltSlot *t;
+    f32 n;
+
+    Tilt_ReadSettings();
+    if (sTiltLevel <= 0 || strength <= 0.0f || time <= 0.0f) {
+        return;
+    }
+    t = Tilt_Find(key, 1);
+    if (t == NULL) {
+        return;
+    }
+    n = strength * time * 0.5f; /* the same measure the shake itself uses: 1.0 = the hardest hits */
+    if (n > 1.0f) {
+        n = 1.0f;
+    }
+    n = sqrtf(n); /* so the light hits tilt too */
+    t->sign = -t->sign;
+    t->target = t->sign * n * 0.09f * (f32)sTiltLevel;
+}
+
+/* Once per frame, with the shake's own countdown. */
+static void Tilt_Tick(const CamShake *key) {
+    TiltSlot *t;
+
+    Tilt_ReadSettings();
+    if (sTiltLevel <= 0) {
+        return;
+    }
+    t = Tilt_Find(key, 0);
+    if (t == NULL) {
+        return;
+    }
+    t->target *= sTiltDecay;
+    t->roll += (t->target - t->roll) * 0.6f;
+    if (t->roll < 0.0005f && t->roll > -0.0005f && t->target < 0.0005f && t->target > -0.0005f) {
+        t->roll = 0.0f;
+        t->target = 0.0f;
+    }
+}
+
+static f32 Tilt_Roll(const CamShake *key) {
+    TiltSlot *t = Tilt_Find(key, 0);
+
+    return t != NULL ? t->roll : 0.0f;
+}
+#endif
+
 /* Registers a shake request in the first slot it dominates, unless a slot already dominates it. */
 void CamShake_Add(CamShake *shake, f32 strength, f32 time) {
     s32 i;
+
+#ifdef PORT
+    Tilt_Hit(shake, strength, time);
+#endif
 
     for (i = 0; i < 4; i++) {
         if (shake->time[i] <= time && shake->strength[i] <= strength) {
@@ -761,6 +880,10 @@ void CamShake_Add(CamShake *shake, f32 strength, f32 time) {
 /* Counts every shake slot down by one frame (1/30 s) and clears the expired ones. */
 void CamShake_Tick(CamShake *shake) {
     s32 i;
+
+#ifdef PORT
+    Tilt_Tick(shake);
+#endif
 
     for (i = 0; i < 4; i++) {
         shake->time[i] -= 0.033333333f;
@@ -787,39 +910,7 @@ void CamShake_Calc(CamShake *shake, Vec4 *posOfs, Vec4 *rotOfs) {
     Vec4_SetZeroW1(posOfs);
     Vec4_SetZero(rotOfs);
 #ifdef PORT
-    /* Tilt (roll) on every hit, Port_Setting("cam_tilt", 0): 0 off, 1..6 how far. It uses no rand(), so the game's random numbers are untouched. */
-    {
-        static int sTiltRead = 0;
-        static int sTilt = 0;
-        static f32 sLastTime = 0.0f;
-        static f32 sSign = 1.0f;
-
-        if (!sTiltRead) {
-            sTilt = Port_Setting("cam_tilt", 0);
-            if (sTilt < 0) {
-                sTilt = 0;
-            }
-            if (sTilt > 6) {
-                sTilt = 6;
-            }
-            sTiltRead = 1;
-        }
-        if (strength <= 0.0f) {
-            sLastTime = 0.0f;
-        } else if (time > sLastTime) {
-            sSign = -sSign; /* a new hit: the other side */
-            sLastTime = time;
-        } else {
-            sLastTime = time;
-        }
-        if (strength > 0.0f && sTilt > 0) {
-            f32 a = time * 0.05f * strength;
-            if (a > 0.1f) {
-                a = 0.1f;
-            }
-            rotOfs->z = sSign * a * 0.5f * (f32)sTilt; /* 0.05 rad (about 3 degrees) per step at most */
-        }
-    }
+    rotOfs->z = Tilt_Roll(shake);
 #endif
     if (strength > 0.0f) {
         amp = time * 0.05f * strength;
